@@ -1,10 +1,8 @@
 /**
- * Netlify Function: 千问AI API代理
- * 隐藏API Key，前端通过 /.netlify/functions/ai-proxy 调用
- * Key存储在Netlify环境变量 QWEN_API_KEY 中
+ * Netlify Function: AI API代理（双引擎自动切换）
+ * 优先使用 DeepSeek（国际可访问），失败自动回退千问
+ * 环境变量：DEEPSEEK_API_KEY 和/或 QWEN_API_KEY
  */
-
-const API_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation';
 
 const SYSTEM_PROMPT = `你是一个地图绘制参数生成器。用户用自然语言描述想画的地图，你必须输出一个JSON对象。
 严格按以下格式输出，不要输出任何其他文字：
@@ -28,6 +26,60 @@ const SYSTEM_PROMPT = `你是一个地图绘制参数生成器。用户用自然
 - 多个区域用不同颜色，颜色从以下选: #e6194b,#3cb44b,#ffe119,#4363d8,#f58231,#911eb4,#46f0f0
 - 只输出JSON，不要markdown，不要解释`;
 
+// ========== DeepSeek API（OpenAI兼容接口，国际可访问）==========
+async function callDeepSeek(prompt, apiKey) {
+    const resp = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey.trim()}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: 'deepseek-chat',
+            messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: prompt }
+            ],
+            temperature: 0.3,
+            max_tokens: 2000
+        })
+    });
+    if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`DeepSeek返回${resp.status}: ${errText.substring(0, 150)}`);
+    }
+    const result = await resp.json();
+    return result.choices?.[0]?.message?.content || '';
+}
+
+// ========== 千问 API（DashScope接口）==========
+async function callQwen(prompt, apiKey) {
+    const resp = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${apiKey.trim()}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            model: 'qwen-plus',
+            input: {
+                messages: [
+                    { role: 'system', content: SYSTEM_PROMPT },
+                    { role: 'user', content: prompt }
+                ]
+            },
+            parameters: { temperature: 0.3, top_p: 0.9 }
+        })
+    });
+    if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`千问返回${resp.status}: ${errText.substring(0, 150)}`);
+    }
+    const result = await resp.json();
+    return result.output?.text || result.choices?.[0]?.message?.content || '';
+}
+
+// ========== JSON提取与参数归一化 ==========
 function extractJSON(text) {
     text = text.trim();
     if (text.startsWith('```')) {
@@ -78,8 +130,8 @@ function normalizeParams(params) {
     return params;
 }
 
+// ========== 主处理函数 ==========
 exports.handler = async (event) => {
-    // CORS头
     const headers = {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type',
@@ -90,17 +142,18 @@ exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
         return { statusCode: 200, headers, body: '' };
     }
-
     if (event.httpMethod !== 'POST') {
         return { statusCode: 405, headers, body: JSON.stringify({ success: false, error: '仅支持POST' }) };
     }
 
-    const apiKey = process.env.QWEN_API_KEY;
-    if (!apiKey) {
+    const deepseekKey = process.env.DEEPSEEK_API_KEY;
+    const qwenKey = process.env.QWEN_API_KEY;
+
+    if (!deepseekKey && !qwenKey) {
         return {
             statusCode: 500,
             headers,
-            body: JSON.stringify({ success: false, error: '服务器未配置QWEN_API_KEY环境变量' })
+            body: JSON.stringify({ success: false, error: '未配置AI API Key，请在Netlify设置 DEEPSEEK_API_KEY 或 QWEN_API_KEY' })
         };
     }
 
@@ -111,35 +164,37 @@ exports.handler = async (event) => {
             return { statusCode: 400, headers, body: JSON.stringify({ success: false, error: '请输入绘图指令' }) };
         }
 
-        const resp = await fetch(API_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: 'qwen-plus',
-                input: {
-                    messages: [
-                        { role: 'system', content: SYSTEM_PROMPT },
-                        { role: 'user', content: prompt }
-                    ]
-                },
-                parameters: { temperature: 0.3, top_p: 0.9 }
-            })
-        });
+        let text = '';
+        let apiUsed = '';
+        const errors = [];
 
-        if (!resp.ok) {
-            const errText = await resp.text();
-            return {
-                statusCode: resp.status,
-                headers,
-                body: JSON.stringify({ success: false, error: `AI服务返回${resp.status}: ${errText.substring(0, 200)}` })
-            };
+        // 策略1：优先用 DeepSeek（国际可访问性最好）
+        if (deepseekKey) {
+            try {
+                text = await callDeepSeek(prompt, deepseekKey);
+                apiUsed = 'deepseek';
+            } catch (e) {
+                errors.push(`DeepSeek: ${e.message}`);
+            }
         }
 
-        const result = await resp.json();
-        const text = result.output?.text || result.choices?.[0]?.message?.content || '';
+        // 策略2：DeepSeek失败，回退千问
+        if (!text && qwenKey) {
+            try {
+                text = await callQwen(prompt, qwenKey);
+                apiUsed = 'qwen';
+            } catch (e) {
+                errors.push(`千问: ${e.message}`);
+            }
+        }
+
+        if (!text) {
+            return {
+                statusCode: 500,
+                headers,
+                body: JSON.stringify({ success: false, error: `所有AI服务均失败: ${errors.join('; ')}` })
+            };
+        }
 
         const params = extractJSON(text);
         if (!params) {
@@ -150,7 +205,7 @@ exports.handler = async (event) => {
         return {
             statusCode: 200,
             headers,
-            body: JSON.stringify({ success: true, params: normalized })
+            body: JSON.stringify({ success: true, params: normalized, api: apiUsed })
         };
     } catch (e) {
         return {
