@@ -1,0 +1,16 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# SPA路由回退
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Function配置
+[functions]
+  node_bundler = "esbuild"

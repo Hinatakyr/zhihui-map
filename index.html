@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智绘地图 · AI地图绘制平台</title>
+    <meta name="description" content="基于AI的中国行政地图绘制工具，支持省市区县三级边界、自然语言智能绘图、地图三要素与高清导出">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+    <!-- 顶部栏 -->
+    <header class="top-bar">
+        <div class="brand">
+            <span class="logo">🗺️</span>
+            <span class="title">智绘地图</span>
+            <span class="subtitle">AI地图绘制平台</span>
+        </div>
+        <nav class="mode-tabs">
+            <button class="mode-tab active" data-mode="manual">手动绘制</button>
+            <button class="mode-tab" data-mode="ai">AI智能绘制</button>
+        </nav>
+        <div class="top-actions">
+            <button class="btn btn-ghost" id="btn-preview">预览</button>
+            <button class="btn btn-primary" id="btn-export">📥 导出图片</button>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- 左侧控制面板 -->
+        <aside class="sidebar" id="sidebar">
+
+            <!-- AI 模式面板 -->
+            <section class="panel" id="panel-ai" style="display:none;">
+                <h3 class="panel-title">🤖 AI智能绘图</h3>
+                <div class="form-item">
+                    <label>用自然语言描述你想要的地图</label>
+                    <textarea id="ai-prompt" placeholder="例如：我想绘制北京市的地形图" rows="3"></textarea>
+                </div>
+                <div class="ai-examples">
+                    <span class="example-chip">绘制北京市的地形图</span>
+                    <span class="example-chip">制作长三角省份行政区划图</span>
+                    <span class="example-chip">显示广东省的交通路网图</span>
+                    <span class="example-chip">黄河流域水系图</span>
+                </div>
+                <button class="btn btn-primary btn-block" id="btn-ai-generate">🚀 AI生成地图</button>
+            </section>
+
+            <!-- 手动模式面板 -->
+            <section class="panel" id="panel-manual">
+                <h3 class="panel-title">🗺️ 区域选择</h3>
+                <div class="form-item">
+                    <label>搜索行政区（放大地图可切换市/县级）</label>
+                    <div class="search-wrap">
+                        <input type="text" id="area-search" placeholder="搜索省/市/县名称，如 北京" autocomplete="off">
+                        <div class="search-dropdown" id="area-dropdown"></div>
+                    </div>
+                </div>
+                <div class="form-item">
+                    <label>当前颜色</label>
+                    <div class="color-palette" id="color-palette"></div>
+                </div>
+                <div class="form-item">
+                    <label>已选区域</label>
+                    <div class="selected-list" id="selected-list">
+                        <div class="empty-tip">点击地图区域或搜索添加</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 底图选择 -->
+            <section class="panel">
+                <h3 class="panel-title">🎨 底图样式</h3>
+                <div class="basemap-grid" id="basemap-grid">
+                    <div class="basemap-item active" data-map="osm">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#f0f0f0,#d4d4d4)"></div>
+                        <span>标准地图</span>
+                    </div>
+                    <div class="basemap-item" data-map="satellite">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#2d5016,#4a7c2e,#1a3d0f)"></div>
+                        <span>卫星影像</span>
+                    </div>
+                    <div class="basemap-item" data-map="terrain">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#8b7355,#d4a76a,#6b8e23)"></div>
+                        <span>地形渲染</span>
+                    </div>
+                    <div class="basemap-item" data-map="light">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#ffffff,#f5f5f5)"></div>
+                        <span>简洁浅色</span>
+                    </div>
+                    <div class="basemap-item" data-map="dark">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"></div>
+                        <span>深色主题</span>
+                    </div>
+                    <div class="basemap-item" data-map="voyager">
+                        <div class="basemap-thumb" style="background:linear-gradient(135deg,#f2efe9,#d4cfc5)"></div>
+                        <span>经典复古</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 地图要素 -->
+            <section class="panel">
+                <h3 class="panel-title">📝 地图要素</h3>
+                <div class="form-item">
+                    <label>地图标题</label>
+                    <input type="text" id="map-title" value="中国行政区划图">
+                </div>
+                <div class="form-item">
+                    <label>图例说明（分号分隔）</label>
+                    <input type="text" id="map-legend-text" placeholder="如：北京市;天津市">
+                </div>
+                <div class="form-item">
+                    <label>注释/数据来源</label>
+                    <input type="text" id="map-notes" value="审图号：GS(2024)0650号 · 数据来源：DataV.GeoAtlas">
+                </div>
+                <div class="form-item">
+                    <label>地图三要素</label>
+                    <div class="checkbox-group">
+                        <label class="checkbox-label"><input type="checkbox" id="show-scale" checked> 比例尺</label>
+                        <label class="checkbox-label"><input type="checkbox" id="show-north" checked> 指北针</label>
+                        <label class="checkbox-label"><input type="checkbox" id="show-legend" checked> 图例</label>
+                        <label class="checkbox-label"><input type="checkbox" id="show-title" checked> 标题</label>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 关于 -->
+            <section class="panel about-panel">
+                <h3 class="panel-title">ℹ️ 关于</h3>
+                <p class="about-text">智绘地图是一个开源的AI地图绘制工具，支持中国省/市/县三级行政边界绘制。</p>
+                <p class="about-text"><a href="https://github.com" target="_blank">GitHub源码</a> · <a href="https://www.netlify.com" target="_blank">Powered by Netlify</a></p>
+            </section>
+        </aside>
+
+        <!-- 右侧地图 -->
+        <div class="map-wrap" id="map-wrap">
+            <div id="map"></div>
+        </div>
+    </main>
+
+    <!-- 加载遮罩 -->
+    <div class="loading-mask" id="loading-mask">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loading-text">加载中...</div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <!-- 脚本 -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

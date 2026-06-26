@@ -1,0 +1,12 @@
+{
+  "name": "zhihui-map",
+  "version": "1.0.0",
+  "description": "智绘地图 - 基于AI的中国行政地图绘制平台",
+  "scripts": {
+    "dev": "npx serve .",
+    "build": "echo 'Static site, no build step needed'"
+  },
+  "devDependencies": {
+    "serve": "^14.0.0"
+  }
+}
