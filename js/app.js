@@ -316,21 +316,33 @@ async function loadAndRenderChildren(targetLevel) {
         const visibleCities = allCities.length > 0
             ? allCities.filter(f => isFeatureInBounds(f, bounds))
             : await loadVisibleCities(bounds);
-        // 按省份归组，批量加载县级数据
+        // 按省份归组，加载本地县级数据文件
         const provAdcodes = new Set();
+        const visibleCityPrefixes = new Set();
         for (const cityFeat of visibleCities.slice(0, 20)) {
             const cityAdcode = String(cityFeat.properties.adcode || '');
-            const provAdcode = cityAdcode.substring(0, 2) + '0000';
-            provAdcodes.add(provAdcode);
+            provAdcodes.add(cityAdcode.substring(0, 2) + '0000');
+            visibleCityPrefixes.add(cityAdcode.substring(0, 4));
         }
         for (const provAdcode of provAdcodes) {
-            const countyGeojson = await fetchLocalCounties(provAdcode + '00');
-            if (countyGeojson) {
-                // 过滤出可见城市的县级数据
-                for (const feat of countyGeojson.features) {
-                    if (isFeatureInBounds(feat, bounds)) allFeatures.push(feat);
+            try {
+                const resp = await fetch(`data/counties/${provAdcode}.json`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    for (const feat of (data.features || [])) {
+                        const featAdcode = String(feat.properties.adcode || '');
+                        // 只加载可见城市的县级数据
+                        if (visibleCityPrefixes.has(featAdcode.substring(0, 4)) &&
+                            isFeatureInBounds(feat, bounds)) {
+                            allFeatures.push(feat);
+                        }
+                    }
+                    // 缓存
+                    if (!adminCache[provAdcode + '_counties']) {
+                        adminCache[provAdcode + '_counties'] = data;
+                    }
                 }
-            }
+            } catch (e) { /* 忽略单个省份加载失败 */ }
         }
         // 如果本地没有，回退到逐城市DataV加载
         if (allFeatures.length === 0) {
