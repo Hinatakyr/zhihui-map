@@ -131,30 +131,29 @@ function switchBasemap(key) {
     });
 }
 
-// ==================== 行政边界：DataV API直连 + 本地回退 ====================
+// ==================== 行政边界：本地优先 + DataV回退 ====================
+let cityBoundariesData = null;  // 本地市级边界数据缓存
+
 async function loadProvinceBoundaries() {
     showLoading('正在加载省级行政边界...');
     try {
-        // 优先尝试 DataV API（部署到Netlify后正常网络可用）
-        let geojson = await fetchDatavGeojson('100000');
-        if (!geojson) {
-            // 回退：加载本地预生成的省级边界数据
-            console.log('DataV API不可达，使用本地边界数据');
-            const resp = await fetch('data/province_boundaries.json');
-            if (!resp.ok) throw new Error('本地边界数据加载失败');
-            geojson = await resp.json();
-            // 缓存到内存
-            adminCache['100000'] = {
-                geojson, level: 'province',
-                units: (geojson.features || []).map(f => ({
-                    name: f.properties.name || '',
-                    adcode: String(f.properties.adcode || ''),
-                    level: 'province'
-                })).sort((a, b) => a.name.localeCompare(b.name))
-            };
-        }
+        // 省级：优先用本地数据（已包含完整岛屿）
+        const resp = await fetch('data/province_boundaries.json');
+        if (!resp.ok) throw new Error('本地边界数据加载失败');
+        const geojson = await resp.json();
         provinceFeatures = geojson.features || [];
+        adminCache['100000'] = {
+            geojson, level: 'province',
+            units: provinceFeatures.map(f => ({
+                name: f.properties.name || '',
+                adcode: String(f.properties.adcode || ''),
+                level: 'province'
+            })).sort((a, b) => a.name.localeCompare(b.name))
+        };
         renderAdminLayer(provinceFeatures, 'province');
+
+        // 后台预加载市级边界数据（不阻塞UI）
+        loadCityBoundariesLocal();
     } catch (e) {
         showToast('省界加载失败：' + e.message, 'error');
     } finally {
@@ -162,29 +161,110 @@ async function loadProvinceBoundaries() {
     }
 }
 
+// 后台加载本地市级边界数据
+async function loadCityBoundariesLocal() {
+    try {
+        const resp = await fetch('data/city_boundaries.json');
+        if (resp.ok) {
+            cityBoundariesData = await resp.json();
+            // 预填充缓存
+            for (const provAdcode in cityBoundariesData) {
+                const provData = cityBoundariesData[provAdcode];
+                const cityFeats = provData.cities || [];
+                const cityGeojson = { type: 'FeatureCollection', features: cityFeats };
+                adminCache[provAdcode] = {
+                    geojson: cityGeojson,
+                    level: 'city',
+                    units: cityFeats.map(f => ({
+                        name: f.properties.name || '',
+                        adcode: String(f.properties.adcode || ''),
+                        level: f.properties.level || 'city'
+                    })).sort((a, b) => a.name.localeCompare(b.name))
+                };
+                cityFeaturesByProvince[provAdcode] = cityFeats;
+            }
+            console.log('市级边界本地数据已加载');
+        }
+    } catch (e) {
+        console.log('市级边界本地数据加载失败，将使用DataV API');
+    }
+}
+
+// 获取某adcode的子级边界（本地优先 → DataV回退）
 async function fetchDatavGeojson(adcode) {
     adcode = String(adcode);
     if (adminCache[adcode]) return adminCache[adcode].geojson;
+
+    // 市级：尝试从本地数据获取
+    if (adcode.endsWith('0000') && adcode !== '100000') {
+        if (cityBoundariesData && cityBoundariesData[adcode]) {
+            const cityFeats = cityBoundariesData[adcode].cities || [];
+            const geojson = { type: 'FeatureCollection', features: cityFeats };
+            adminCache[adcode] = {
+                geojson, level: 'city',
+                units: cityFeats.map(f => ({
+                    name: f.properties.name || '',
+                    adcode: String(f.properties.adcode || ''),
+                    level: f.properties.level || 'city'
+                })).sort((a, b) => a.name.localeCompare(b.name))
+            };
+            cityFeaturesByProvince[adcode] = cityFeats;
+            return geojson;
+        }
+    }
+
+    // 县级：尝试从本地按省份分块文件加载
+    if (!adcode.endsWith('0000')) {
+        const localGeojson = await fetchLocalCounties(adcode);
+        if (localGeojson) return localGeojson;
+    }
+
+    // 回退：DataV API
     try {
         const resp = await fetch(`${DATAV_BASE}/${adcode}_full.json`);
         if (!resp.ok) return null;
         const geojson = await resp.json();
         if (geojson.type !== 'FeatureCollection' || !geojson.features?.length) return null;
-
-        // 判断层级
         let level;
         if (adcode === '100000') level = 'province';
         else if (adcode.endsWith('0000')) level = 'city';
         else level = 'district';
-
         const units = geojson.features.map(f => ({
             name: f.properties.name || '',
             adcode: String(f.properties.adcode || ''),
             level: f.properties.level || level
         })).sort((a, b) => a.name.localeCompare(b.name));
-
         adminCache[adcode] = { geojson, level, units };
         if (level === 'city') cityFeaturesByProvince[adcode] = geojson.features || [];
+        return geojson;
+    } catch (e) {
+        return null;
+    }
+}
+
+// 从本地按省份分块文件加载县级边界
+async function fetchLocalCounties(cityAdcode) {
+    cityAdcode = String(cityAdcode);
+    // 推断省份adcode
+    const provAdcode = cityAdcode.substring(0, 2) + '0000';
+    try {
+        const resp = await fetch(`data/counties/${provAdcode}.json`);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        // 找到该市的县级features
+        const countyFeats = (data.features || []).filter(f =>
+            String(f.properties.adcode || '').startsWith(cityAdcode.substring(0, 4))
+        );
+        if (!countyFeats.length) return null;
+        const geojson = { type: 'FeatureCollection', features: countyFeats };
+        adminCache[cityAdcode] = {
+            geojson, level: 'district',
+            units: countyFeats.map(f => ({
+                name: f.properties.name || '',
+                adcode: String(f.properties.adcode || ''),
+                level: f.properties.level || 'district'
+            })).sort((a, b) => a.name.localeCompare(b.name))
+        };
         return geojson;
     } catch (e) {
         return null;
@@ -231,14 +311,33 @@ async function loadAndRenderChildren(targetLevel) {
         }
         renderAdminLayer(allFeatures, 'city');
     } else {
-        // district: 先获取可见城市
+        // district: 从本地县级数据加载（按省份分块文件）
         const allCities = Object.values(cityFeaturesByProvince).flat();
         const visibleCities = allCities.length > 0
             ? allCities.filter(f => isFeatureInBounds(f, bounds))
             : await loadVisibleCities(bounds);
-        for (const cityFeat of visibleCities.slice(0, 15)) {
-            const children = await fetchDatavGeojson(cityFeat.properties.adcode);
-            if (children) allFeatures.push(...children.features);
+        // 按省份归组，批量加载县级数据
+        const provAdcodes = new Set();
+        for (const cityFeat of visibleCities.slice(0, 20)) {
+            const cityAdcode = String(cityFeat.properties.adcode || '');
+            const provAdcode = cityAdcode.substring(0, 2) + '0000';
+            provAdcodes.add(provAdcode);
+        }
+        for (const provAdcode of provAdcodes) {
+            const countyGeojson = await fetchLocalCounties(provAdcode + '00');
+            if (countyGeojson) {
+                // 过滤出可见城市的县级数据
+                for (const feat of countyGeojson.features) {
+                    if (isFeatureInBounds(feat, bounds)) allFeatures.push(feat);
+                }
+            }
+        }
+        // 如果本地没有，回退到逐城市DataV加载
+        if (allFeatures.length === 0) {
+            for (const cityFeat of visibleCities.slice(0, 15)) {
+                const children = await fetchDatavGeojson(cityFeat.properties.adcode);
+                if (children) allFeatures.push(...children.features);
+            }
         }
         renderAdminLayer(allFeatures, 'district');
     }
